@@ -1,0 +1,159 @@
+#!/usr/bin/env python3
+"""Validate a Kiro power directory.
+
+Usage: python3 scripts/validate_power.py <power-dir>
+
+Exit code 0 on success, 1 on any check failure.
+Prints a summary of checks run and any failures.
+"""
+from __future__ import annotations
+import json
+import re
+import sys
+from pathlib import Path
+
+
+def fail(msg: str) -> None:
+    print(f"FAIL: {msg}")
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) != 2:
+        print("usage: validate_power.py <power-dir>", file=sys.stderr)
+        return 2
+    power_dir = Path(argv[1])
+    if not power_dir.is_dir():
+        fail(f"not a directory: {power_dir}")
+        return 1
+    failures: list[str] = []
+
+    power_md = power_dir / "POWER.md"
+    if not power_md.is_file():
+        failures.append(f"missing required file: {power_md}")
+
+    # Frontmatter check (after the existence block above)
+    if power_md.is_file():
+        # Normalize: strip BOM and convert CRLF to LF so authors on Windows or
+        # editors that emit BOMs don't trigger misleading "missing fence" errors.
+        text = power_md.read_text(encoding="utf-8").lstrip("﻿").replace("\r\n", "\n")
+        if not text.startswith("---\n"):
+            failures.append("POWER.md frontmatter: must start with '---' fence")
+        else:
+            # Closing fence: '\n---' followed by either a newline or end-of-string.
+            end_match = re.search(r"\n---(\n|$)", text[4:])
+            if end_match is None:
+                failures.append("POWER.md frontmatter: missing closing '---' fence")
+            else:
+                front = text[4:4 + end_match.start()]
+                required_fields = ["name:", "displayName:", "description:", "keywords:", "author:"]
+                for field in required_fields:
+                    if field not in front:
+                        failures.append(f"POWER.md frontmatter: missing field '{field.rstrip(':')}'")
+
+    mcp_path = power_dir / "mcp.json"
+    if not mcp_path.is_file():
+        failures.append("mcp.json: missing required file")
+    else:
+        try:
+            data = json.loads(mcp_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            failures.append(f"mcp.json: invalid JSON ({exc})")
+        else:
+            servers = data.get("mcpServers", {})
+            if not isinstance(servers, dict):
+                failures.append("mcp.json: mcpServers must be an object")
+            else:
+                bd = servers.get("brightdata")
+                if not bd:
+                    failures.append("mcp.json: missing mcpServers.brightdata entry")
+                elif not isinstance(bd, dict):
+                    failures.append("mcp.json: mcpServers.brightdata must be an object")
+                elif "${BRIGHTDATA_API_KEY}" not in bd.get("url", ""):
+                    failures.append(
+                        "mcp.json: brightdata.url must reference ${BRIGHTDATA_API_KEY}"
+                    )
+
+    steering_dir = power_dir / "steering"
+    if not steering_dir.is_dir():
+        failures.append("steering/: missing required directory")
+    else:
+        required_steering = [
+            "scrape-workflow.md",
+            "phase1-detect-and-plan.md",
+            "phase2-scraping-playbook.md",
+            "phase3-integrate.md",
+            "phase4-mcp-and-verify.md",
+        ]
+        present = {p.name for p in steering_dir.iterdir() if p.is_file()}
+        for name in required_steering:
+            if name not in present:
+                failures.append(f"steering/{name}: missing required file")
+
+        # Orchestrator must reference each phase file by exact filename
+        wf = steering_dir / "scrape-workflow.md"
+        if wf.is_file():
+            wf_text = wf.read_text(encoding="utf-8")
+            for phase in required_steering[1:]:  # skip self
+                if phase not in wf_text:
+                    failures.append(
+                        f"scrape-workflow.md: must reference '{phase}' by exact filename"
+                    )
+
+    phase3_path = power_dir / "steering" / "phase3-integrate.md"
+    v1_required = {
+        # v1 templates
+        "templates/module/py-bs4.py",
+        "templates/module/ts-cheerio.ts",
+        "templates/route/next-app-router.ts",
+        "templates/route/fastapi.py",
+        "templates/tool/anthropic-sdk-ts.ts",
+        "templates/tool/anthropic-sdk-py.py",
+        "templates/fallback/curl.sh",
+        # v1.1 templates
+        "templates/module/ts-fetch.ts",
+        "templates/module/py-stdlib.py",
+        "templates/route/next-pages-router.ts",
+        "templates/route/express.ts",
+        "templates/route/fastify.ts",
+        "templates/route/hono.ts",
+        "templates/route/koa.ts",
+        "templates/route/flask.py",
+        "templates/route/django.py",
+        "templates/tool/langchain-ts.ts",
+        "templates/tool/langchain-py.py",
+        "templates/tool/openai-ts.ts",
+        "templates/tool/openai-py.py",
+        "templates/tool/mastra.ts",
+        "templates/tool/vercel-ai-sdk.ts",
+    }
+    if phase3_path.is_file():
+        phase3_text = phase3_path.read_text(encoding="utf-8")
+        template_refs = set(re.findall(
+            r"templates/(?:module|route|tool|fallback)/[A-Za-z0-9_./-]+\.(?:ts|py|sh)",
+            phase3_text,
+        ))
+        for rel in sorted(template_refs):
+            full = power_dir / rel
+            if not full.is_file():
+                if rel in v1_required:
+                    failures.append(f"missing required v1 template: {rel}")
+                else:
+                    print(f"WARN: missing template {rel} (referenced in phase3-integrate.md)")
+    # Also FAIL if any v1_required is missing even if not referenced in phase3
+    for rel in sorted(v1_required):
+        full = power_dir / rel
+        if not full.is_file():
+            msg = f"missing required v1 template: {rel}"
+            if msg not in failures:
+                failures.append(msg)
+
+    if failures:
+        for f in failures:
+            fail(f)
+        return 1
+    print(f"OK: {power_dir} passed all checks")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

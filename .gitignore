@@ -1,0 +1,18 @@
+# powers/ is a clone of github.com/kirodotdev/powers used as inspiration.
+# It is not part of this repo's tree.
+powers/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+
+# Local env files
+.env
+.env.local
